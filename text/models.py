@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+
 from utils import to_gpu, load_embeddings
 import json
 import os
@@ -11,7 +12,7 @@ import numpy as np
 
 class MLP_D(nn.Module):
     def __init__(self, ninput, noutput, layers,
-                 activation=nn.LeakyReLU(0.2), gpu=False):
+                 activation=nn.LeakyReLU(0.2), gpu=True):
         super(MLP_D, self).__init__()
         self.ninput = ninput
         self.noutput = noutput
@@ -57,11 +58,10 @@ class MLP_D(nn.Module):
 
 class MLP_G(nn.Module):
     def __init__(self, ninput, noutput, layers,
-                 activation=nn.ReLU(), gpu=False):
+                 activation=nn.ReLU(), gpu=True):
         super(MLP_G, self).__init__()
         self.ninput = ninput
         self.noutput = noutput
-        self.gpu = gpu
 
         layer_sizes = [ninput] + [int(x) for x in layers.split('-')]
         self.layers = []
@@ -85,11 +85,6 @@ class MLP_G(nn.Module):
         self.init_weights()
 
     def forward(self, x):
-        if x.__class__.__name__ =="ndarray":
-            x = Variable(torch.FloatTensor(x)).cuda()
-            #x = x.cpu()
-        if x.__class__.__name__ =="FloatTensor":
-            x = Variable(x).cuda()
         for i, layer in enumerate(self.layers):
             x = layer(x)
         return x
@@ -102,7 +97,6 @@ class MLP_G(nn.Module):
                 layer.bias.data.fill_(0)
             except:
                 pass
-
 
 class MLP_I(nn.Module):
     # separate Inverter to map continuous code back to z
@@ -122,7 +116,6 @@ class MLP_I(nn.Module):
 
             bn = nn.BatchNorm1d(layer_sizes[i + 1], eps=1e-05, momentum=0.1)
             self.layers.append(bn)
-            self.add_module("bn" + str(i + 1), bn)
 
             self.layers.append(activation)
             self.add_module("activation" + str(i + 1), activation)
@@ -158,7 +151,7 @@ class MLP_I_AE(nn.Module):
         self.gpu = gpu
         noutput_mu = noutput
         noutput_var = noutput
-        
+
         layer_sizes = [ninput] + [int(x) for x in layers.split('-')]
         self.layers = []
 
@@ -180,22 +173,22 @@ class MLP_I_AE(nn.Module):
 
         self.linear_mu = nn.Linear(noutput, noutput_mu)
         self.linear_var = nn.Linear(noutput, noutput_var)
-        
+
         self.init_weights()
 
     def forward(self, x):
         for i, layer in enumerate(self.layers):
             x = layer(x)
         mu = self.linear_mu(x)
-        logvar = self.linear_var(x)    
+        logvar = self.linear_var(x)
         std = 0.5*logvar
         std = std.exp_()                                        # std
         epsilon = Variable(std.data.new(std.size()).normal_())  # normal noise with the same type and size as std.data
         if self.gpu:
             epsilon = epsilon.cuda()
-        
+
         sample = mu + (epsilon * std)
-        
+
         return sample
 
     def init_weights(self):
@@ -206,12 +199,11 @@ class MLP_I_AE(nn.Module):
                 layer.bias.data.fill_(0)
             except:
                 pass
-            
+
         self.linear_mu.weight.data.normal_(0, init_std)
         self.linear_mu.bias.data.fill_(0)
         self.linear_var.weight.data.normal_(0, init_std)
         self.linear_var.bias.data.fill_(0)
-
 
 class Seq2SeqCAE(nn.Module):
     # CNN encoder, LSTM decoder
@@ -297,8 +289,11 @@ class Seq2SeqCAE(nn.Module):
         if not self.gpu:
             self.start_symbols = self.start_symbols.cpu()
         # <sos>
-        self.start_symbols.data.resize_(batch_size, 1)
-        self.start_symbols.data.fill_(1)
+        with torch.no_grad():
+            self.start_symbols.resize_(batch_size, 1) 
+            self.start_symbols.fill_(1)
+	# self.start_symbols.data.resize_(batch_size, 1)
+        # self.start_symbols.data.fill_(1)
 
         embedding = self.embedding_decoder(self.start_symbols)
         inputs = torch.cat([embedding, hidden.unsqueeze(1)], 2)
@@ -359,11 +354,11 @@ class Seq2SeqCAE(nn.Module):
         hidden = torch.div(hidden, norms.expand_as(hidden))
 
         if noise and self.noise_radius > 0:
-            gauss_noise = torch.normal(means=torch.zeros(hidden.size()),
+            gauss_noise = torch.normal(mean=torch.zeros(hidden.size()),
                                        std=self.noise_radius)
             if self.gpu:
                 gauss_noise = gauss_noise.cuda()
-                
+
             hidden = hidden + to_gpu(self.gpu, Variable(gauss_noise))
 
         return hidden
@@ -416,15 +411,16 @@ class Seq2SeqCAE(nn.Module):
         return decoded
 
 
+
 class Seq2Seq(nn.Module):
-    def __init__(self, emsize, nhidden, ntokens, nlayers, noise_radius=0.2,
+    def __init__(self, emsize, nhidden, ntokens, nlayers, noise_r=0.2,
                  hidden_init=False, dropout=0, gpu=True):
         super(Seq2Seq, self).__init__()
         self.nhidden = nhidden
         self.emsize = emsize
         self.ntokens = ntokens
         self.nlayers = nlayers
-        self.noise_radius = noise_radius
+        self.noise_r = noise_r
         self.hidden_init = hidden_init
         self.dropout = dropout
         self.gpu = gpu
@@ -472,12 +468,12 @@ class Seq2Seq(nn.Module):
         self.linear.bias.data.fill_(0)
 
     def init_hidden(self, bsz):
-        zeros1 = Variable(torch.zeros(self.nlayers, bsz, self.nhidden))
-        zeros2 = Variable(torch.zeros(self.nlayers, bsz, self.nhidden))
-        return (to_gpu(self.gpu, zeros1), to_gpu(self.gpu, zeros2)) # (hidden, cell)
+        zeros1 = Variable(torch.zeros(1, bsz, self.nhidden))
+        zeros2 = Variable(torch.zeros(1, bsz, self.nhidden))
+        return (to_gpu(self.gpu, zeros1), to_gpu(self.gpu, zeros2))
 
     def init_state(self, bsz):
-        zeros = Variable(torch.zeros(self.nlayers, bsz, self.nhidden))
+        zeros = Variable(torch.zeros(1, bsz, self.nhidden))
         return to_gpu(self.gpu, zeros)
 
     def store_grad_norm(self, grad):
@@ -485,62 +481,36 @@ class Seq2Seq(nn.Module):
         self.grad_norm = norm.detach().data.mean()
         return grad
 
-    def forward(self, indices, lengths, noise, encode_only=False, generator=None, inverter=None):
-        if not generator:
-            batch_size, maxlen = indices.size()
+    def forward(self, indices, lengths, noise, encode_only=False):
+        batch_size, maxlen = indices.size()
 
-            hidden = self.encode(indices, lengths, noise)
+        hidden = self.encode(indices, lengths, noise)
 
-            if encode_only:
-                return hidden
+        if encode_only:
+            return hidden
 
-            if hidden.requires_grad:
-                hidden.register_hook(self.store_grad_norm)
+        if hidden.requires_grad:
+            hidden.register_hook(self.store_grad_norm)
 
-            decoded = self.decode(hidden, batch_size, maxlen,
-                                  indices=indices, lengths=lengths)
-        else:
-            batch_size, maxlen = indices.size()
-            self.embedding.weight.data[0].fill_(0)
-            self.embedding_decoder.weight.data[0].fill_(0)
-            hidden = self.encode(indices, lengths, noise)
-            if encode_only:
-                return hidden
-
-            if hidden.requires_grad:
-                hidden.register_hook(self.store_grad_norm)
-
-            z_hat = inverter(hidden)
-            c_hat = generator(z_hat)
-
-            decoded = self.decode(c_hat, batch_size, maxlen,
+        decoded = self.decode(hidden, batch_size, maxlen,
                               indices=indices, lengths=lengths)
 
         return decoded
 
-    def encode(self, indices, lengths, noise):
+    def encode(self, indices, lengths, noise): 
         embeddings = self.embedding(indices)
         packed_embeddings = pack_padded_sequence(input=embeddings,
                                                  lengths=lengths,
                                                  batch_first=True)
 
-        # Encode
         packed_output, state = self.encoder(packed_embeddings)
-
-        hidden, cell = state
-        # batch_size x nhidden
-        hidden = hidden[-1]  # get hidden state of last layer of encoder
-
-        # normalize to unit ball (l2 norm of 1) - p=2, dim=1
-        norms = torch.norm(hidden, 2, 1)
-        if norms.ndimension()==1:
-            norms=norms.unsqueeze(1)
-        hidden = torch.div(hidden, norms.expand_as(hidden))
-
-        if noise and self.noise_radius > 0:
-            gauss_noise = torch.normal(means=torch.zeros(hidden.size()),
-                                       std=self.noise_radius)
-            hidden = hidden + to_gpu(self.gpu, Variable(gauss_noise))
+        hidden = state[0][-1]
+        hidden = hidden / torch.norm(hidden, p=2, dim=1, keepdim=True)
+        
+        if noise and self.noise_r > 0:
+            gauss_noise = torch.normal(mean=torch.zeros(hidden.size()),
+                                       std=self.noise_r)
+            hidden = hidden + Variable(gauss_noise.cuda())
 
         return hidden
 
@@ -562,7 +532,7 @@ class Seq2Seq(nn.Module):
 
         packed_output, state = self.decoder(packed_embeddings, state)
         output, lengths = pad_packed_sequence(packed_output, batch_first=True)
-        
+
         # reshape to batch_size*maxlen x nhidden before linear over vocab
         decoded = self.linear(output.contiguous().view(-1, self.nhidden))
         decoded = decoded.view(batch_size, maxlen, self.ntokens)
@@ -573,7 +543,7 @@ class Seq2Seq(nn.Module):
         """Generate through decoder; no backprop"""
 
         batch_size = hidden.size(0)
-
+        device = hidden.device
         if self.hidden_init:
             # initialize decoder hidden state to encoder output
             state = (hidden.unsqueeze(0), self.init_state(batch_size))
@@ -581,8 +551,9 @@ class Seq2Seq(nn.Module):
             state = self.init_hidden(batch_size)
 
         # <sos>
-        self.start_symbols.data.resize_(batch_size, 1)
-        self.start_symbols.data.fill_(1)
+        # self.start_symbols.data.resize_(batch_size, 1)
+        # self.start_symbols.data.fill_(1)
+        self.start_symbols = torch.ones(batch_size, 1, device=device).long()
 
         embedding = self.embedding_decoder(self.start_symbols)
         inputs = torch.cat([embedding, hidden.unsqueeze(1)], 2)
@@ -592,42 +563,22 @@ class Seq2Seq(nn.Module):
         for i in range(maxlen):
             output, state = self.decoder(inputs, state)
             overvocab = self.linear(output.squeeze(1))
-
             if not sample:
                 vals, indices = torch.max(overvocab, 1)
             else:
-                # sampling
-                probs = F.softmax(overvocab/temp)
+                probs = F.softmax(overvocab / temp, dim=-1)
                 indices = torch.multinomial(probs, 1)
-
-            if indices.ndimension()==1:
-                indices = indices.unsqueeze(1)
+            indices = indices.unsqueeze(1)
             all_indices.append(indices)
 
             embedding = self.embedding_decoder(indices)
             inputs = torch.cat([embedding, hidden.unsqueeze(1)], 2)
 
         max_indices = torch.cat(all_indices, 1)
-
         return max_indices
-
-
-def load_models(load_path):
-    model_args = json.load(open("{}/args.json".format(load_path), "r"))
-    word2idx = json.load(open("{}/vocab.json".format(load_path), "r"))
-    idx2word = {v: k for k, v in word2idx.items()}
-
-    print('Loading models from' + load_path+"/models")
-    ae_path = os.path.join(load_path+"/models/", "autoencoder_model.pt")
-    inv_path = os.path.join(load_path+"/models/", "inverter_model.pt")
-    gen_path = os.path.join(load_path+"/models/", "gan_gen_model.pt")
-    disc_path = os.path.join(load_path+"/models/", "gan_disc_model.pt")
-
-    autoencoder = torch.load(ae_path)
-    inverter = torch.load(inv_path)
-    gan_gen = torch.load(gen_path)
-    gan_disc = torch.load(disc_path)
-    return model_args, idx2word, autoencoder, inverter, gan_gen, gan_disc
+    
+    def noise_anneal(self, fac):
+        self.noise_r *= fac
 
 
 def generate(autoencoder, gan_gen, z, vocab, sample, maxlen):
@@ -636,7 +587,7 @@ def generate(autoencoder, gan_gen, z, vocab, sample, maxlen):
     """
     if type(z) == Variable:
         noise = z
-    elif type(z) == torch.FloatTensor or type(z) == torch.cuda.FloatTensor:
+    elif type(z) == torch.Tensor or type(z) == torch.cuda.Tensor:
         noise = Variable(z, volatile=True)
     elif type(z) == np.ndarray:
         noise = Variable(torch.from_numpy(z).float(), volatile=True)
@@ -668,7 +619,6 @@ def generate(autoencoder, gan_gen, z, vocab, sample, maxlen):
         sentences.append(sent)
 
     return sentences
-
 
 class JSDistance(nn.Module):
     def __init__(self, mean=0, std=1, epsilon=1e-5):
@@ -706,7 +656,6 @@ class JSDistance(nn.Module):
             d2 = torch.sum(target * torch.log(target/input))/input.size(0)
             return (d1+d2)/2
 
-
 class Baseline_LSTM(nn.Module):
     def __init__(self, emb_size, hidden_size, maxlen=10, dropout= 0, vocab_size=11004, gpu=False):
         super(Baseline_LSTM, self).__init__()
@@ -732,7 +681,7 @@ class Baseline_LSTM(nn.Module):
         for i in range(len(layer_sizes) - 1):
             layer = nn.Linear(layer_sizes[i], layer_sizes[i + 1])
             self.layers.add_module("layer" + str(i + 1), layer)
-            
+
             bn = nn.BatchNorm1d(layer_sizes[i + 1], eps=1e-05, momentum=0.1)
             self.layers.add_module("bn" + str(i + 1), bn)
 
@@ -740,24 +689,24 @@ class Baseline_LSTM(nn.Module):
 
         layer = nn.Linear(layer_sizes[-1], 3)
         self.layers.add_module("layer" + str(len(layer_sizes)), layer)
-        
+
         self.layers.add_module("softmax", nn.Softmax())
-        
+
         self.init_weights()
 
     def init_weights(self):
         initrange = 0.1
-    
+
         # Initialize Vocabulary Matrix Weight
         self.embedding_prem.weight.data.uniform_(-initrange, initrange)
         self.embedding_hypo.weight.data.uniform_(-initrange, initrange)
-    
+
         # Initialize Encoder and Decoder Weights
         for p in self.premise_encoder.parameters():
             p.data.uniform_(-initrange, initrange)
         for p in self.hypothesis_encoder.parameters():
             p.data.uniform_(-initrange, initrange)
-    
+
         # Initialize Linear Weight
         init_std = 0.02
         for layer in self.layers:
@@ -777,7 +726,6 @@ class Baseline_LSTM(nn.Module):
         self.grad_norm = norm.detach().data.mean()
         return grad
 
-        
     def forward(self, batch):
         premise_indices, hypothesis_indices = batch
         batch_size = premise_indices.size(0)
@@ -788,13 +736,13 @@ class Baseline_LSTM(nn.Module):
         hidden_prem= hidden_prem[-1]
         if hidden_prem.requires_grad:
             hidden_prem.register_hook(self.store_grad_norm)
-                
+
         hypothesis = self.embedding_hypo(hypothesis_indices)
         output_hypo, (hidden_hypo, _) = self.hypothesis_encoder(hypothesis, state_hypo)
         hidden_hypo= hidden_hypo[-1]
         if hidden_hypo.requires_grad:
             hidden_hypo.register_hook(self.store_grad_norm)
-            
+
         concatenated = torch.cat([hidden_prem, hidden_hypo], 1)
         probs = self.layers(concatenated)
         return probs
@@ -809,14 +757,16 @@ class Baseline_Embeddings(nn.Module):
         embeddings_mat = load_embeddings()
         self.embedding_prem.weight.data.copy_(embeddings_mat)
         self.embedding_hypo.weight.data.copy_(embeddings_mat)
-        
+
     def forward(self, batch):
         premise_indices, hypothesis_indices = batch
         enc_premise = self.embedding_prem(premise_indices)
         enc_hypothesis = self.embedding_hypo(hypothesis_indices)
         enc_premise = torch.mean(enc_premise,1).squeeze(1)
         enc_hypothesis = torch.mean(enc_hypothesis,1).squeeze(1)
-        
+
         concatenated = torch.cat([enc_premise, enc_hypothesis], 1)
         probs = self.linear(concatenated)
         return probs
+
+
